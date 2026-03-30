@@ -4,7 +4,7 @@ from .vehicle import Vehicle, VehicleSpec
 from .traffic_light import TrafficLightPhase, TrafficLight
 from .street import Lane, Street
 from .intersection import Intersection
-from .spawn_point import SpawnPoint, DespawnPoint
+from .spawn_point import SpawnPoint, DespawnPoint, SpawnKind
 from .city import City
 
 __all__ = [
@@ -14,6 +14,6 @@ __all__ = [
     "TrafficLightPhase", "TrafficLight",
     "Lane", "Street",
     "Intersection",
-    "SpawnPoint", "DespawnPoint",
+    "SpawnPoint", "DespawnPoint", "SpawnKind",
     "City",
 ]

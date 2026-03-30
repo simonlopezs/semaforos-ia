@@ -4,16 +4,31 @@ Spawn and despawn points for vehicles.
 SpawnPoint  → vehicles enter the simulation here.
 DespawnPoint → vehicles exit the simulation here.
 
-Both are attached to a street; their position is usually at the boundary
-of the simulated area (city edge, freeway on-ramp, etc.).
+They can be placed ANYWHERE along a street: at the city boundary (simulating
+traffic entering from outside the map), at a house/garage, a parking lot,
+a shopping mall, a bus terminal, etc.  The `kind` attribute describes the
+origin/destination type so the simulator can weight spawn rates accordingly.
 """
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
 
+from enum import Enum
+
 from src.simulation.enums import VehicleType
 from src.simulation.models.geometry import Point2D
+
+
+class SpawnKind(Enum):
+    """Describes what real-world feature the spawn/despawn represents."""
+    CITY_BORDER = "city_border"         # edge of simulated area
+    RESIDENTIAL = "residential"         # house, apartment, garage
+    PARKING_LOT = "parking_lot"         # mall, supermarket, etc.
+    BUS_TERMINAL = "bus_terminal"
+    COMMERCIAL = "commercial"           # office building, factory
+    SCHOOL = "school"
+    HOSPITAL = "hospital"
 
 
 @dataclass
@@ -32,10 +47,15 @@ class SpawnPoint:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     name: str = ""
     position: Point2D = field(default_factory=lambda: Point2D(0.0, 0.0))
+    kind: SpawnKind = SpawnKind.CITY_BORDER
 
     # Which street/lane vehicles spawn onto
     street_id: str = ""
     lane_index: int = 0
+
+    # Where along the street this point sits [0.0 = start, 1.0 = end].
+    # Allows spawning mid-block (e.g., a house at 40% of the street).
+    street_progress: float = 0.0
 
     # Initial bearing of spawned vehicles (degrees, 0°=East)
     heading: float = 0.0
@@ -87,10 +107,14 @@ class DespawnPoint:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     name: str = ""
     position: Point2D = field(default_factory=lambda: Point2D(0.0, 0.0))
+    kind: SpawnKind = SpawnKind.CITY_BORDER
 
     # Street and lane where vehicles "exit"
     street_id: str = ""
     lane_index: int = 0
+
+    # Where along the street this point sits [0.0 = start, 1.0 = end]
+    street_progress: float = 1.0
 
     # Capture radius: vehicle is despawned when its front is within this distance
     capture_radius: float = 5.0    # meters

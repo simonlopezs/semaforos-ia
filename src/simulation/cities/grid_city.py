@@ -23,11 +23,11 @@ Coordinate system: origin at bottom-left corner, meters.
 """
 from __future__ import annotations
 
-from src.simulation.enums import PavementCondition, TrafficLightState
+from src.simulation.enums import PavementCondition, TrafficLightState, VehicleType
 from src.simulation.models.city import City, CityBounds
 from src.simulation.models.geometry import Point2D
 from src.simulation.models.intersection import Intersection
-from src.simulation.models.spawn_point import SpawnPoint, DespawnPoint
+from src.simulation.models.spawn_point import SpawnPoint, DespawnPoint, SpawnKind
 from src.simulation.models.street import Street
 from src.simulation.models.traffic_light import TrafficLight, standard_phases
 
@@ -172,9 +172,14 @@ def build_grid_city(
                 city.traffic_lights[lid].apply_offset()
 
     # ------------------------------------------------------------------
-    # 4. Spawn / Despawn points at border nodes
-    #    Each border node gets one SpawnPoint and one DespawnPoint.
+    # 4. Spawn / Despawn points
+    #
+    # Two kinds:
+    #   a) CITY_BORDER — at border nodes (traffic entering/exiting the map)
+    #   b) RESIDENTIAL — mid-block on interior streets (houses, garages)
     # ------------------------------------------------------------------
+
+    # 4a. Border spawn/despawn
     border_nodes: list[tuple[Intersection, float]] = []  # (node, entry_heading)
 
     # South edge: heading = 90° (northbound entry)
@@ -194,13 +199,14 @@ def build_grid_city(
         border_nodes.append((nodes[cols][row], 180.0))
 
     for node, heading in border_nodes:
-        # Find a street attached to this node to anchor spawn/despawn
         street_id = node.street_ids[0] if node.street_ids else ""
 
         sp = SpawnPoint(
             name=f"Spawn@{node.name}",
             position=Point2D(node.position.x, node.position.y),
+            kind=SpawnKind.CITY_BORDER,
             street_id=street_id,
+            street_progress=0.0,
             heading=heading,
             spawn_rate=spawn_rate,
         )
@@ -209,11 +215,57 @@ def build_grid_city(
         dp = DespawnPoint(
             name=f"Despawn@{node.name}",
             position=Point2D(node.position.x, node.position.y),
+            kind=SpawnKind.CITY_BORDER,
             street_id=street_id,
+            street_progress=1.0,
             capture_radius=8.0,
         )
         city.add_despawn_point(dp)
 
-        # Cross-link spawn→all despawns handled by simulator; nothing needed here.
+    # 4b. Mid-block residential spawn/despawn on some interior streets.
+    #     These simulate houses/garages: low spawn rate, mostly cars.
+    import random as _random
+    rng = _random.Random(42)  # deterministic layout
+
+    residential_weights = {
+        VehicleType.CAR.value:        0.85,
+        VehicleType.MOTORCYCLE.value: 0.10,
+        VehicleType.VAN.value:        0.05,
+    }
+
+    all_streets = list(city.streets.values())
+    # Pick ~30 % of interior horizontal streets for residential spawn points
+    interior_streets = [
+        s for s in all_streets
+        if s.zone == "urban_grid"
+    ]
+    chosen = rng.sample(interior_streets, k=max(1, len(interior_streets) // 3))
+
+    for street in chosen:
+        # Place a spawn point at a random position between 20%–80% of the street
+        progress = rng.uniform(0.2, 0.8)
+        pos, heading = street.point_at_distance(progress * street.length)
+
+        sp = SpawnPoint(
+            name=f"House@{street.name}:{progress:.0%}",
+            position=pos,
+            kind=SpawnKind.RESIDENTIAL,
+            street_id=street.id,
+            street_progress=progress,
+            heading=heading,
+            spawn_rate=rng.uniform(0.5, 2.0),  # much lower than border
+            vehicle_type_weights=residential_weights,
+        )
+        city.add_spawn_point(sp)
+
+        dp = DespawnPoint(
+            name=f"Home@{street.name}:{progress:.0%}",
+            position=pos,
+            kind=SpawnKind.RESIDENTIAL,
+            street_id=street.id,
+            street_progress=progress,
+            capture_radius=5.0,
+        )
+        city.add_despawn_point(dp)
 
     return city
