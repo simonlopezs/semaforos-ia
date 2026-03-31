@@ -332,10 +332,36 @@ class Simulator:
                         must_stop_for_light = True
                     # else: can't stop safely → commit to crossing
 
-            # --- Calculate stop target from traffic light ---
+            # --- Check if next street is full (don't enter intersection) ---
+            must_stop_congestion = False
+            route_obj_check: Route | None = v.planned_route  # type: ignore[assignment]
+            if route_obj_check and not must_stop_for_light and dist_to_end < 30:
+                if route_obj_check.on_final_street:
+                    pass  # already on destination street, no next street to check
+                else:
+                    # Find the next street the vehicle wants to enter
+                    next_iid = route_obj_check.next_intersection_id
+                    if next_iid and next_iid == target_intersection_id:
+                        # Check one step further
+                        peek_idx = route_obj_check.current_index + 1
+                        if peek_idx < len(route_obj_check.intersection_ids):
+                            after_iid = route_obj_check.intersection_ids[peek_idx]
+                            next_sid = self.router.street_between(target_intersection_id, after_iid)
+                            if next_sid:
+                                next_st = self.city.get_street(next_sid)
+                                if next_st and not self._has_room(next_st, target_intersection_id, v.length):
+                                    must_stop_congestion = True
+                    elif next_iid:
+                        next_sid = self.router.street_between(target_intersection_id, next_iid)
+                        if next_sid:
+                            next_st = self.city.get_street(next_sid)
+                            if next_st and not self._has_room(next_st, target_intersection_id, v.length):
+                                must_stop_congestion = True
+
+            # --- Calculate stop target from traffic light or congestion ---
             # The stop point is at the edge of the intersection square.
             light_stop_dist: float | None = None
-            if must_stop_for_light:
+            if must_stop_for_light or must_stop_congestion:
                 light_stop_dist = dist_to_end - stop_margin
 
             # --- Calculate stop target from vehicle ahead ---
@@ -439,7 +465,7 @@ class Simulator:
                     v.acceleration = 0.0
 
             # --- Hard clamp: front must not pass the stop line ---
-            if must_stop_for_light and street.length > 0:
+            if (must_stop_for_light or must_stop_congestion) and street.length > 0:
                 if is_forward:
                     stop_progress = 1.0 - stop_margin / street.length
                     if v.street_progress > stop_progress:
@@ -556,6 +582,48 @@ class Simulator:
                 best_light = light
 
         return best_light if best_diff < 60 else None
+
+    def _has_room(self, street: Street, from_intersection_id: str, vehicle_length: float) -> bool:
+        """Check if there's room to enter a street without blocking the intersection."""
+        if street.start_intersection_id == from_intersection_id:
+            lane_idx = 0
+        elif street.end_intersection_id == from_intersection_id:
+            lane_idx = 1
+        else:
+            return True  # can't determine, assume ok
+
+        min_gap = 1.0
+        needed = vehicle_length + min_gap
+
+        # Find the rearmost vehicle in the entry lane
+        rearmost_progress: float | None = None
+        rearmost_length: float = 0.0
+        for other in self.city.vehicles.values():
+            if other.current_street_id != street.id or other.current_lane_index != lane_idx:
+                continue
+            if lane_idx == 0:
+                if rearmost_progress is None or other.street_progress < rearmost_progress:
+                    rearmost_progress = other.street_progress
+                    rearmost_length = other.length
+            else:
+                if rearmost_progress is None or other.street_progress > rearmost_progress:
+                    rearmost_progress = other.street_progress
+                    rearmost_length = other.length
+
+        if rearmost_progress is None:
+            return True  # empty lane
+
+        if street.length <= 0:
+            return False
+
+        if lane_idx == 0:
+            rear_of_rearmost = rearmost_progress - rearmost_length / street.length
+            available = rear_of_rearmost * street.length
+        else:
+            rear_of_rearmost = rearmost_progress + rearmost_length / street.length
+            available = (1.0 - rear_of_rearmost) * street.length
+
+        return available >= needed
 
     def _gap_to_vehicle_ahead(
         self, vehicle: Vehicle, vehicles_sorted: list[Vehicle], street: Street
