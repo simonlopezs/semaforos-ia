@@ -1,8 +1,9 @@
 """
 Pygame-based renderer for the traffic simulation.
 
-Draws streets, intersections, traffic lights, and vehicles in real time.
-Includes a simple HUD with stats.
+Streets are drawn as two parallel lanes (forward + backward).
+Vehicles are drawn with their FRONT at the position point, body extending backward.
+Vehicles are laterally offset to their lane (right side of the road).
 """
 from __future__ import annotations
 
@@ -20,13 +21,12 @@ if TYPE_CHECKING:
     from src.simulation.simulator import Simulator
 
 
-# Vehicle colors by type
 VEHICLE_COLORS: dict[VehicleType, tuple[int, int, int]] = {
-    VehicleType.CAR:        (79, 195, 247),   # light blue
-    VehicleType.MOTORCYCLE: (255, 241, 118),   # yellow
-    VehicleType.VAN:        (129, 199, 132),   # green
-    VehicleType.BUS:        (255, 138, 101),   # orange
-    VehicleType.TRUCK:      (229, 115, 115),   # red
+    VehicleType.CAR:        (79, 195, 247),
+    VehicleType.MOTORCYCLE: (255, 241, 118),
+    VehicleType.VAN:        (129, 199, 132),
+    VehicleType.BUS:        (255, 138, 101),
+    VehicleType.TRUCK:      (229, 115, 115),
 }
 
 LIGHT_COLORS: dict[TrafficLightState, tuple[int, int, int]] = {
@@ -37,6 +37,9 @@ LIGHT_COLORS: dict[TrafficLightState, tuple[int, int, int]] = {
     TrafficLightState.FLASHING_YELLOW: (255, 235, 59),
     TrafficLightState.OFF:             (80, 80, 80),
 }
+
+# Lane offset from centerline in meters (each lane is ~3.5m wide, offset by half)
+LANE_OFFSET_M = 2.0
 
 
 class Renderer:
@@ -51,39 +54,80 @@ class Renderer:
         self.font = pygame.font.SysFont("monospace", 14)
         self.font_big = pygame.font.SysFont("monospace", 16, bold=True)
 
-        # Map area (leave margin for HUD on the right)
         self.map_margin = 40
         self.hud_width = 200
         self.map_w = config.window_width - self.hud_width - self.map_margin * 2
         self.map_h = config.window_height - self.map_margin * 2
 
-    # ------------------------------------------------------------------
-    # Coordinate transform
-    # ------------------------------------------------------------------
+        # Cache scale once we know the city
+        self._scale: float = 1.0
+        self._offset_x: float = 0.0
+        self._offset_y: float = 0.0
+        self._bounds_set = False
 
-    def world_to_screen(self, point: Point2D, city: City) -> tuple[int, int]:
+    def _update_transform(self, city: City) -> None:
         b = city.bounds
         if b.width == 0 or b.height == 0:
-            return (0, 0)
-
-        # Uniform scaling (keep aspect ratio)
+            return
         scale_x = self.map_w / b.width
         scale_y = self.map_h / b.height
-        scale = min(scale_x, scale_y)
+        self._scale = min(scale_x, scale_y)
+        self._offset_x = self.map_margin + (self.map_w - b.width * self._scale) / 2
+        self._offset_y = self.map_margin + (self.map_h - b.height * self._scale) / 2
+        self._bounds_set = True
 
-        # Center the map
-        offset_x = self.map_margin + (self.map_w - b.width * scale) / 2
-        offset_y = self.map_margin + (self.map_h - b.height * scale) / 2
-
-        sx = offset_x + (point.x - b.min_x) * scale
-        sy = offset_y + (b.max_y - point.y) * scale  # flip Y
+    def world_to_screen(self, point: Point2D, city: City) -> tuple[int, int]:
+        if not self._bounds_set:
+            self._update_transform(city)
+        b = city.bounds
+        sx = self._offset_x + (point.x - b.min_x) * self._scale
+        sy = self._offset_y + (b.max_y - point.y) * self._scale
         return int(sx), int(sy)
 
-    def world_scale(self, meters: float, city: City) -> float:
-        b = city.bounds
-        scale_x = self.map_w / b.width if b.width else 1
-        scale_y = self.map_h / b.height if b.height else 1
-        return meters * min(scale_x, scale_y)
+    def world_scale(self, meters: float) -> float:
+        return meters * self._scale
+
+    # ------------------------------------------------------------------
+    # Offset helpers
+    # ------------------------------------------------------------------
+
+    def _offset_point(
+        self, point: Point2D, bearing_deg: float, lateral_m: float
+    ) -> Point2D:
+        """
+        Offset a point perpendicular to the bearing direction.
+        positive lateral_m = right side (when facing bearing direction).
+        """
+        # Right perpendicular = bearing - 90°
+        perp_rad = math.radians(bearing_deg - 90)
+        return Point2D(
+            point.x + math.cos(perp_rad) * lateral_m,
+            point.y + math.sin(perp_rad) * lateral_m,
+        )
+
+    def _offset_polyline(
+        self, nodes: list[Point2D], lateral_m: float
+    ) -> list[Point2D]:
+        """Offset an entire polyline laterally. Uses segment bearings."""
+        if len(nodes) < 2:
+            return list(nodes)
+        result: list[Point2D] = []
+        for i in range(len(nodes)):
+            if i == 0:
+                bearing = nodes[0].bearing_to(nodes[1])
+            elif i == len(nodes) - 1:
+                bearing = nodes[-2].bearing_to(nodes[-1])
+            else:
+                # Average bearing of segments before and after this node
+                b1 = nodes[i - 1].bearing_to(nodes[i])
+                b2 = nodes[i].bearing_to(nodes[i + 1])
+                # Average angles correctly
+                bearing = math.degrees(math.atan2(
+                    (math.sin(math.radians(b1)) + math.sin(math.radians(b2))) / 2,
+                    (math.cos(math.radians(b1)) + math.cos(math.radians(b2))) / 2,
+                ))
+            result.append(self._offset_point(nodes[i], bearing, lateral_m))
+        return result
 
     # ------------------------------------------------------------------
     # Main render
@@ -91,8 +135,8 @@ class Renderer:
 
     def render(self, sim: Simulator) -> None:
         city = sim.city
-        cfg = self.config
-        self.screen.fill(cfg.bg_color)
+        self._update_transform(city)
+        self.screen.fill(self.config.bg_color)
 
         self._draw_streets(city)
         self._draw_intersections(city)
@@ -107,60 +151,82 @@ class Renderer:
     # ------------------------------------------------------------------
 
     def _draw_streets(self, city: City) -> None:
+        lane_w = max(2, int(self.world_scale(3.0)))  # lane width in pixels
+        divider_color = (40, 40, 55)
+
         for street in city.streets.values():
             if len(street.nodes) < 2:
                 continue
-            points = [self.world_to_screen(n, city) for n in street.nodes]
-            pygame.draw.lines(
-                self.screen,
-                self.config.street_color,
-                False,
-                points,
-                self.config.street_width_px,
-            )
+
+            offset = LANE_OFFSET_M
+
+            # Forward lane (right side of the road direction)
+            fwd_nodes = self._offset_polyline(street.nodes, offset)
+            fwd_pts = [self.world_to_screen(n, city) for n in fwd_nodes]
+            if len(fwd_pts) >= 2:
+                pygame.draw.lines(self.screen, self.config.street_color, False, fwd_pts, lane_w)
+
+            if street.is_bidirectional:
+                # Backward lane (left side)
+                bwd_nodes = self._offset_polyline(street.nodes, -offset)
+                bwd_pts = [self.world_to_screen(n, city) for n in bwd_nodes]
+                if len(bwd_pts) >= 2:
+                    pygame.draw.lines(self.screen, self.config.street_color, False, bwd_pts, lane_w)
+
+                # Center divider line (thin, dashed look via thin line)
+                center_pts = [self.world_to_screen(n, city) for n in street.nodes]
+                if len(center_pts) >= 2:
+                    pygame.draw.lines(self.screen, divider_color, False, center_pts, 1)
 
     def _draw_intersections(self, city: City) -> None:
-        r = max(3, self.config.street_width_px // 2 + 2)
+        # Draw intersection as a filled square covering all lane offsets
+        half_size = max(4, int(self.world_scale(LANE_OFFSET_M + 1.5)))
         for inter in city.intersections.values():
-            pos = self.world_to_screen(inter.position, city)
-            pygame.draw.circle(self.screen, self.config.intersection_color, pos, r)
+            sx, sy = self.world_to_screen(inter.position, city)
+            rect = pygame.Rect(sx - half_size, sy - half_size, half_size * 2, half_size * 2)
+            pygame.draw.rect(self.screen, self.config.intersection_color, rect)
 
     def _draw_traffic_lights(self, city: City) -> None:
         for light in city.traffic_lights.values():
             color = LIGHT_COLORS.get(light.current_state, (80, 80, 80))
 
-            # Offset the light dot slightly in the approach direction
-            offset_m = 6.0  # meters from intersection center
+            # Position light at the lane edge near the intersection
+            offset_m = LANE_OFFSET_M + 2.5  # slightly outside the lane
             rad = math.radians(light.orientation_deg)
-            offset_point = Point2D(
+            light_world = Point2D(
                 light.position.x + math.cos(rad) * offset_m,
                 light.position.y + math.sin(rad) * offset_m,
             )
-            pos = self.world_to_screen(offset_point, city)
-            pygame.draw.circle(self.screen, color, pos, 4)
+            pos = self.world_to_screen(light_world, city)
+            pygame.draw.circle(self.screen, color, pos, 3)
 
     def _draw_vehicles(self, city: City) -> None:
         for v in city.vehicles.values():
             color = VEHICLE_COLORS.get(v.vehicle_type, (200, 200, 200))
-            pos = self.world_to_screen(v.position, city)
 
-            # Draw as a small oriented rectangle
-            length_px = max(4, int(self.world_scale(v.length, city)))
-            width_px = max(2, int(self.world_scale(v.width, city)))
+            # Both directions use their RIGHT side (right-hand traffic).
+            # _offset_point with positive lateral gives right side of heading.
+            lateral = LANE_OFFSET_M
 
-            # Use half-size for cleaner look
-            hl = length_px / 2
+            # Offset position perpendicular to heading
+            offset_pos = self._offset_point(v.position, v.heading, lateral)
+            sx, sy = self.world_to_screen(offset_pos, city)
+
+            length_px = max(4, int(self.world_scale(v.length)))
+            width_px = max(2, int(self.world_scale(v.width)))
             hw = width_px / 2
 
-            rad = -math.radians(v.heading)  # screen Y is flipped
+            # Vehicle heading in screen space (Y flipped)
+            rad = -math.radians(v.heading)
             cos_a = math.cos(rad)
             sin_a = math.sin(rad)
 
-            # Rectangle corners (centered on position)
+            # Front is at (sx, sy); body extends BACKWARD by length_px
+            # Local coords: front = (0,0), rear = (-length_px, 0)
             corners = []
-            for lx, ly in [(-hl, -hw), (hl, -hw), (hl, hw), (-hl, hw)]:
-                rx = pos[0] + lx * cos_a - ly * sin_a
-                ry = pos[1] + lx * sin_a + ly * cos_a
+            for lx, ly in [(0, -hw), (0, hw), (-length_px, hw), (-length_px, -hw)]:
+                rx = sx + lx * cos_a - ly * sin_a
+                ry = sy + lx * sin_a + ly * cos_a
                 corners.append((rx, ry))
 
             pygame.draw.polygon(self.screen, color, corners)
@@ -203,7 +269,6 @@ class Renderer:
     # ------------------------------------------------------------------
 
     def tick(self) -> float:
-        """Call once per frame. Returns dt in seconds."""
         return self.clock.tick(self.config.fps) / 1000.0
 
     def destroy(self) -> None:

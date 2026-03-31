@@ -33,7 +33,7 @@ class SimulationConfig:
     # --- Physics defaults (used when vehicle spec isn't consulted yet) ---
     default_acceleration: float = 2.5    # m/s²  comfortable accel
     default_deceleration: float = 3.5    # m/s²  comfortable braking
-    stop_margin: float = 5.0             # meters before intersection stop line
+    stop_margin: float = 1.5             # meters before intersection center (stop line)
     min_following_gap: float = 1.0       # meters bumper-to-bumper minimum
 
     # --- Rendering ---
