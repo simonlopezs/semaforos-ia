@@ -22,6 +22,7 @@ from src.simulation.models.street import Street
 from src.simulation.models.traffic_light import TrafficLight, TrafficLightPhase
 from src.simulation.models.vehicle import Vehicle, VEHICLE_SPECS
 from src.simulation.models.spawn_point import SpawnPoint, SpawnKind
+from src.simulation.physics import emergency_braking
 from src.simulation.router import Router, Route
 
 
@@ -261,10 +262,20 @@ class Simulator:
                 if light.current_state == TrafficLightState.RED:
                     must_stop_for_light = True
                 elif light.current_state == TrafficLightState.YELLOW:
-                    time_to_red = light.time_remaining_in_phase
-                    time_to_reach = dist_to_end / max(v.speed, 0.1)
-                    if time_to_reach > time_to_red:
+                    # Can we physically stop before the intersection?
+                    stop_dist = dist_to_end - self.config.stop_margin
+                    braking = emergency_braking(
+                        speed_ms=v.speed,
+                        mass_kg=v.mass,
+                        distance_available=max(0.0, stop_dist),
+                        weather=self.config.weather,
+                        pavement=street.pavement_condition,
+                        reaction_time=v.driver.reaction_time * 0.3,  # reduced: already alert
+                    )
+                    if braking.can_stop:
+                        # Physics says we CAN stop → brake
                         must_stop_for_light = True
+                    # else: can't stop safely → commit to crossing
 
             # --- Calculate stop target from traffic light ---
             # The stop point is stop_margin meters before the intersection.
@@ -296,7 +307,14 @@ class Simulator:
                 effective_stop_dist = ahead_stop_dist
 
             # --- Decide acceleration ---
-            decel = self.config.default_deceleration
+            # Compute physics-based max deceleration for this vehicle + conditions
+            from src.simulation.physics import compute_effective_friction, G
+            import math
+
+            mu_eff = compute_effective_friction(
+                self.config.weather, street.pavement_condition, v.mass
+            )
+            max_decel = mu_eff * G  # physics-limited deceleration
             accel = self.config.default_acceleration
 
             if effective_stop_dist is not None and effective_stop_dist <= 0.05:
@@ -309,22 +327,22 @@ class Simulator:
                 )
             elif effective_stop_dist is not None:
                 # Max speed at which we can still brake in time:
-                #   v_max = sqrt(2 * decel * distance)
-                import math
-                max_safe_speed = math.sqrt(2.0 * decel * max(effective_stop_dist, 0.01))
+                #   v_max = sqrt(2 × max_decel × distance)
+                max_safe_speed = math.sqrt(
+                    2.0 * max_decel * max(effective_stop_dist, 0.01)
+                )
                 max_safe_speed = min(max_safe_speed, target_speed)
 
                 if v.speed > max_safe_speed + 0.1:
-                    # Above safe speed — brake
+                    # Above safe speed — brake (capped to physics limit)
                     needed_decel = v.speed ** 2 / (2.0 * max(effective_stop_dist, 0.1))
-                    v.acceleration = -min(needed_decel, decel * 2.5)
+                    v.acceleration = -min(needed_decel, max_decel)
                     v.state = VehicleState.DECELERATING
                 elif v.speed < max_safe_speed - 0.1:
-                    # Below safe speed — can still accelerate
+                    # Below safe speed — can still accelerate toward stop point
                     v.acceleration = accel * min(1.0, effective_stop_dist / 10.0)
                     v.state = VehicleState.ACCELERATING
                 else:
-                    # At about the right speed — coast
                     v.acceleration = 0.0
                     v.state = VehicleState.CRUISING
             elif v.speed < target_speed:
