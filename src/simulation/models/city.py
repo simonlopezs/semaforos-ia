@@ -140,6 +140,20 @@ class City:
             if lid in self.traffic_lights
         ]
 
+    def compute_intersection_sizes(self) -> None:
+        """
+        Set each intersection's stop_line_distance based on the width
+        of the crossing streets. The intersection forms a square whose
+        side = max width of streets meeting there. The stop line is at
+        the edge of this square = half that max width from center.
+        """
+        for iid, inter in self.intersections.items():
+            streets = self.streets_at_intersection(iid)
+            if not streets:
+                continue
+            max_width = max(s.width for s in streets)
+            inter.stop_line_distance = max_width / 2.0
+
     def neighbors(self, intersection_id: str) -> list[Intersection]:
         """All intersections reachable in one street hop."""
         result: list[Intersection] = []

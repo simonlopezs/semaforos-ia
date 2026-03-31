@@ -98,6 +98,7 @@ class Street:
     is_bidirectional: bool = True
     lanes_per_direction: int = 1     # number of lanes in each direction
     max_speed_kmh: float = 50.0      # posted speed limit in km/h
+    width: float = 7.0               # total road width in meters (both directions)
     has_bike_lane: bool = False
     has_bus_lane: bool = False
 

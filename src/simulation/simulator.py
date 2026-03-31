@@ -40,6 +40,16 @@ def randomize_traffic_lights(city: City, seed: int = 0) -> None:
         green_ns = rng.uniform(15, 45)
         green_ew = rng.uniform(15, 45)
         yellow = rng.uniform(3, 5)
+        all_red = 2.0  # clearance interval — both directions red
+
+        # Full cycle sequence (shared by all lights at this intersection):
+        #   NS_GREEN → NS_YELLOW → ALL_RED → EW_GREEN → EW_YELLOW → ALL_RED
+        #
+        # NS sees: GREEN, YELLOW, RED,   RED,     RED,     RED
+        # EW sees: RED,   RED,    RED,   GREEN,   YELLOW,  RED
+        #
+        # We express this as explicit phase lists with NO offsets,
+        # so both directions share the exact same clock.
 
         for light in lights:
             is_ns = abs(light.orientation_deg % 180 - 90) < 45
@@ -47,20 +57,24 @@ def randomize_traffic_lights(city: City, seed: int = 0) -> None:
                 light.phases = [
                     TrafficLightPhase(TrafficLightState.GREEN, green_ns),
                     TrafficLightPhase(TrafficLightState.YELLOW, yellow),
-                    TrafficLightPhase(TrafficLightState.RED, green_ew + yellow),
+                    TrafficLightPhase(TrafficLightState.RED, all_red),       # clearance
+                    TrafficLightPhase(TrafficLightState.RED, green_ew),      # EW has green
+                    TrafficLightPhase(TrafficLightState.RED, yellow),        # EW has yellow
+                    TrafficLightPhase(TrafficLightState.RED, all_red),       # clearance
                 ]
-                light.phase_offset = 0.0
             else:
                 light.phases = [
+                    TrafficLightPhase(TrafficLightState.RED, green_ns),      # NS has green
+                    TrafficLightPhase(TrafficLightState.RED, yellow),        # NS has yellow
+                    TrafficLightPhase(TrafficLightState.RED, all_red),       # clearance
                     TrafficLightPhase(TrafficLightState.GREEN, green_ew),
                     TrafficLightPhase(TrafficLightState.YELLOW, yellow),
-                    TrafficLightPhase(TrafficLightState.RED, green_ns + yellow),
+                    TrafficLightPhase(TrafficLightState.RED, all_red),       # clearance
                 ]
-                light.phase_offset = green_ns + yellow
 
+            light.phase_offset = 0.0
             light.current_phase_index = 0
             light.time_in_current_phase = 0.0
-            light.apply_offset()
 
 
 # ---------------------------------------------------------------------------
@@ -76,12 +90,46 @@ class Simulator:
         self.total_spawned: int = 0
         self.total_despawned: int = 0
 
+        # Optimality tracking: ratio of optimal_time / actual_time for completed trips
+        self.completed_trips: int = 0
+        self.optimality_sum: float = 0.0  # sum of (optimal / actual) per trip
+
         self._spawn_accum: dict[str, float] = {
             sp_id: 0.0 for sp_id in city.spawn_points
         }
 
         randomize_traffic_lights(city, seed=seed)
         self.router = Router(city)
+
+        # Pre-spawn vehicles so the city isn't empty at start
+        self._pre_spawn()
+
+    @property
+    def avg_optimality(self) -> float:
+        """Average ratio of optimal_time / actual_time across all completed trips."""
+        if self.completed_trips == 0:
+            return 0.0
+        return self.optimality_sum / self.completed_trips
+
+    def _record_trip(self, vehicle: Vehicle) -> None:
+        """Record optimality metric when a vehicle completes its trip."""
+        route: Route | None = vehicle.planned_route  # type: ignore[assignment]
+        if route and route.optimal_time > 0 and vehicle.time_alive > 0.1:
+            optimality = route.optimal_time / vehicle.time_alive
+            self.optimality_sum += min(optimality, 1.0)
+            self.completed_trips += 1
+
+    def _pre_spawn(self) -> None:
+        """Spawn an initial batch of vehicles so the city isn't empty."""
+        target = int(self.config.max_vehicles * self.config.traffic_level * 0.3)
+        spawn_list = [sp for sp in self.city.spawn_points.values() if sp.is_active]
+        if not spawn_list:
+            return
+        attempts = 0
+        while self.total_spawned < target and attempts < target * 3:
+            sp = self.rng.choice(spawn_list)
+            self._try_spawn(sp)
+            attempts += 1
 
     # ------------------------------------------------------------------
     # Main tick
@@ -165,32 +213,35 @@ class Simulator:
                 else street.start_intersection_id
             )
 
-        # Pick a random DespawnPoint as destination and compute route
-        despawn_list = [
-            dp for dp in self.city.despawn_points.values()
-            if dp.is_active and dp.id != sp.id
-        ]
-        if not despawn_list:
+        # Pick a random point on a random street as destination
+        all_streets = list(self.city.streets.values())
+        if not all_streets:
             return
 
-        dp = self.rng.choice(despawn_list)
+        dest_street = self.rng.choice(all_streets)
+        dest_progress = self.rng.uniform(0.15, 0.85)  # avoid extremes near intersections
 
-        # Find the intersection closest to the despawn point
-        dest_street = self.city.get_street(dp.street_id)
-        if not dest_street:
-            return
-        dest_intersection_id = dest_street.end_intersection_id
+        # Route to the intersection closest to the destination point
+        # Try both ends — pick the one that gives a valid route
+        route: Route | None = None
+        for dest_iid in (dest_street.start_intersection_id, dest_street.end_intersection_id):
+            if dest_iid == origin_intersection_id and dest_street.id == street.id:
+                continue  # skip routing to ourselves
+            candidate = self.router.find_route(origin_intersection_id, dest_iid)
+            if candidate and not candidate.is_finished:
+                candidate.destination_street_id = dest_street.id
+                candidate.destination_progress = dest_progress
+                route = candidate
+                break
 
-        route = self.router.find_route(origin_intersection_id, dest_intersection_id)
-        if not route or route.is_finished:
-            # No path found — try alternate destination intersection
-            dest_intersection_id = dest_street.start_intersection_id
-            route = self.router.find_route(origin_intersection_id, dest_intersection_id)
-            if not route or route.is_finished:
-                return  # can't route, skip
+        if not route:
+            return  # can't route, skip
+
+        # Calculate optimal travel time (all green, speed limit)
+        self.router.compute_route_metrics(route)
 
         vehicle.planned_route = route
-        vehicle.destination_id = dp.id
+        vehicle.destination_id = dest_street.id
 
         # Temporarily set lane to check room
         vehicle.current_lane_index = 0 if forward else 1
@@ -255,6 +306,10 @@ class Simulator:
                 dist_to_end = v.street_progress * street.length
                 target_intersection_id = street.start_intersection_id
 
+            # --- Stop line distance from intersection geometry ---
+            target_inter = self.city.get_intersection(target_intersection_id)
+            stop_margin = target_inter.stop_line_distance if target_inter else self.config.stop_margin
+
             # --- Check traffic light ---
             must_stop_for_light = False
             light = self._find_light_for_approach(target_intersection_id, v.heading)
@@ -263,7 +318,7 @@ class Simulator:
                     must_stop_for_light = True
                 elif light.current_state == TrafficLightState.YELLOW:
                     # Can we physically stop before the intersection?
-                    stop_dist = dist_to_end - self.config.stop_margin
+                    stop_dist = dist_to_end - stop_margin
                     braking = emergency_braking(
                         speed_ms=v.speed,
                         mass_kg=v.mass,
@@ -278,10 +333,10 @@ class Simulator:
                     # else: can't stop safely → commit to crossing
 
             # --- Calculate stop target from traffic light ---
-            # The stop point is stop_margin meters before the intersection.
+            # The stop point is at the edge of the intersection square.
             light_stop_dist: float | None = None
             if must_stop_for_light:
-                light_stop_dist = dist_to_end - self.config.stop_margin
+                light_stop_dist = dist_to_end - stop_margin
 
             # --- Calculate stop target from vehicle ahead ---
             # gap = distance from my front to the rear of the vehicle ahead
@@ -297,14 +352,23 @@ class Simulator:
                 if ahead_stop_dist < 0:
                     ahead_stop_dist = 0.0
 
+            # --- Calculate stop target from destination (final street) ---
+            dest_stop_dist: float | None = None
+            route_obj: Route | None = v.planned_route  # type: ignore[assignment]
+            if route_obj and route_obj.on_final_street:
+                if is_forward:
+                    dest_stop_dist = (route_obj.destination_progress - v.street_progress) * street.length
+                else:
+                    dest_stop_dist = (v.street_progress - route_obj.destination_progress) * street.length
+                if dest_stop_dist < 0:
+                    dest_stop_dist = 0.0
+
             # --- Pick the more restrictive stop target ---
             effective_stop_dist: float | None = None
-            if light_stop_dist is not None and ahead_stop_dist is not None:
-                effective_stop_dist = min(light_stop_dist, ahead_stop_dist)
-            elif light_stop_dist is not None:
-                effective_stop_dist = light_stop_dist
-            elif ahead_stop_dist is not None:
-                effective_stop_dist = ahead_stop_dist
+            for candidate in (light_stop_dist, ahead_stop_dist, dest_stop_dist):
+                if candidate is not None:
+                    if effective_stop_dist is None or candidate < effective_stop_dist:
+                        effective_stop_dist = candidate
 
             # --- Decide acceleration ---
             # Compute physics-based max deceleration for this vehicle + conditions
@@ -363,17 +427,28 @@ class Simulator:
             else:
                 v.street_progress -= progress_delta
 
+            # --- Hard clamp: front must not pass destination point ---
+            if route_obj and route_obj.on_final_street and street.length > 0:
+                if is_forward and v.street_progress > route_obj.destination_progress:
+                    v.street_progress = route_obj.destination_progress
+                    v.speed = 0.0
+                    v.acceleration = 0.0
+                elif not is_forward and v.street_progress < route_obj.destination_progress:
+                    v.street_progress = route_obj.destination_progress
+                    v.speed = 0.0
+                    v.acceleration = 0.0
+
             # --- Hard clamp: front must not pass the stop line ---
             if must_stop_for_light and street.length > 0:
                 if is_forward:
-                    stop_progress = 1.0 - self.config.stop_margin / street.length
+                    stop_progress = 1.0 - stop_margin / street.length
                     if v.street_progress > stop_progress:
                         v.street_progress = stop_progress
                         v.speed = 0.0
                         v.acceleration = 0.0
                         v.state = VehicleState.WAITING_LIGHT
                 else:
-                    stop_progress = self.config.stop_margin / street.length
+                    stop_progress = stop_margin / street.length
                     if v.street_progress < stop_progress:
                         v.street_progress = stop_progress
                         v.speed = 0.0
@@ -391,6 +466,19 @@ class Simulator:
             v.time_alive += dt
             if v.speed < 0.1:
                 v.time_waiting += dt
+
+            # --- Check if reached destination on final street ---
+            if route_obj and route_obj.on_final_street:
+                reached_dest = False
+                if is_forward and v.street_progress >= route_obj.destination_progress - 0.005:
+                    reached_dest = True
+                elif not is_forward and v.street_progress <= route_obj.destination_progress + 0.005:
+                    reached_dest = True
+                if reached_dest and v.speed < 0.5:
+                    self._record_trip(v)
+                    self.city.remove_vehicle(v.id)
+                    self.total_despawned += 1
+                    continue
 
             # --- Check if reached end of street ---
             reached_end = (
@@ -524,6 +612,31 @@ class Simulator:
                 route.advance()
 
             if route.is_finished:
+                # Route intersections done — enter destination street for final leg
+                if (
+                    route.destination_street_id
+                    and not route.on_final_street
+                ):
+                    dest_street = self.city.get_street(route.destination_street_id)
+                    if dest_street:
+                        placed = self._place_on_street(
+                            vehicle, dest_street, arrived_at_id
+                        )
+                        if placed:
+                            route.on_final_street = True
+                            return
+                        # Can't enter — wait
+                        vehicle.speed = 0.0
+                        vehicle.state = VehicleState.STOPPED
+                        route.current_index = max(0, route.current_index - 1)
+                        if is_forward:
+                            vehicle.street_progress = 0.99
+                        else:
+                            vehicle.street_progress = 0.01
+                        return
+
+                # No destination street or already on it — despawn
+                self._record_trip(vehicle)
                 self.city.remove_vehicle(vehicle.id)
                 self.total_despawned += 1
                 return
@@ -617,13 +730,27 @@ class Simulator:
         vehicle.current_street_id = street.id
         vehicle.current_lane_index = lane_idx
         vehicle.street_progress = entry_progress
-        vehicle.speed = 0.0  # start from stop after turning
 
         is_forward = lane_idx == 0
-        vehicle.heading = (
+        new_heading = (
             street.bearing_deg if is_forward
             else (street.bearing_deg + 180) % 360
         )
+
+        # Reduce speed based on turn angle (sharper turn = more speed loss)
+        import math
+        angle_diff = abs(((new_heading - vehicle.heading + 180) % 360) - 180)
+        # 0° = straight → keep 90%, 90° = right angle → keep 40%, 180° = U-turn → keep 10%
+        speed_factor = max(0.1, 1.0 - 0.6 * (angle_diff / 180.0))
+        vehicle.speed *= speed_factor
+
+        vehicle.heading = new_heading
+
+        # Update world position immediately so vehicle doesn't blink
+        clamped = max(0.0, min(1.0, entry_progress))
+        pos, _ = street.point_at_distance(clamped * street.length)
+        vehicle.position = pos
+
         return True
 
     def _despawn_vehicles(self) -> None:

@@ -75,7 +75,7 @@ def main() -> None:
                         sim, renderer = build_simulation(args)
                         paused = False
                     elif event.key == pygame.K_UP:
-                        sim.config.traffic_level = min(1.0, sim.config.traffic_level + 0.1)
+                        sim.config.traffic_level = min(5.0, sim.config.traffic_level + 0.1)
                     elif event.key == pygame.K_DOWN:
                         sim.config.traffic_level = max(0.0, sim.config.traffic_level - 0.1)
                     elif event.key in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):

@@ -148,6 +148,7 @@ class Renderer:
         self.screen.fill(self.config.bg_color)
 
         self._draw_streets(city)
+        self._draw_direction_arrows(city)
         self._draw_intersections(city)
         self._draw_traffic_lights(city)
         if self.show_routes:
@@ -189,10 +190,69 @@ class Renderer:
                 if len(center_pts) >= 2:
                     pygame.draw.lines(self.screen, divider_color, False, center_pts, 1)
 
+    def _draw_direction_arrows(self, city: City) -> None:
+        """Draw small arrows alongside each lane at mid-block to show direction."""
+        arrow_color = (90, 90, 110)
+        arrow_len_px = 8
+        arrow_head_px = 4
+
+        for street in city.streets.values():
+            if len(street.nodes) < 2:
+                continue
+
+            # Midpoint of the street centerline
+            mid_dist = street.length / 2.0
+            mid_pt, bearing = street.point_at_distance(mid_dist)
+
+            # Offset further outside the lane (LANE_OFFSET_M + extra)
+            arrow_offset_m = LANE_OFFSET_M + 3.5
+
+            # Forward arrow (right side of road direction)
+            fwd_world = self._offset_point(mid_pt, bearing, arrow_offset_m)
+            fwd_center = self.world_to_screen(fwd_world, city)
+            self._draw_arrow(fwd_center, bearing, arrow_len_px, arrow_head_px, arrow_color)
+
+            if street.is_bidirectional:
+                # Backward arrow (left side, opposite direction)
+                bwd_world = self._offset_point(mid_pt, bearing, -arrow_offset_m)
+                bwd_center = self.world_to_screen(bwd_world, city)
+                self._draw_arrow(bwd_center, bearing + 180, arrow_len_px, arrow_head_px, arrow_color)
+
+    def _draw_arrow(
+        self,
+        center: tuple[int, int],
+        bearing_deg: float,
+        length: int,
+        head_size: int,
+        color: tuple[int, int, int],
+    ) -> None:
+        """Draw a small directional arrow at screen coordinates."""
+        # Arrow direction in screen space (Y flipped)
+        rad = -math.radians(bearing_deg)
+        dx = math.cos(rad)
+        dy = math.sin(rad)
+
+        # Tail and tip
+        half = length / 2
+        tx = center[0] - dx * half
+        ty = center[1] - dy * half
+        hx = center[0] + dx * half
+        hy = center[1] + dy * half
+
+        # Draw shaft
+        pygame.draw.line(self.screen, color, (int(tx), int(ty)), (int(hx), int(hy)), 1)
+
+        # Draw arrowhead (two small lines from tip)
+        for angle_offset in (150, -150):
+            a = rad + math.radians(angle_offset)
+            ax = hx + math.cos(a) * head_size
+            ay = hy + math.sin(a) * head_size
+            pygame.draw.line(self.screen, color, (int(hx), int(hy)), (int(ax), int(ay)), 1)
+
     def _draw_intersections(self, city: City) -> None:
-        # Draw intersection as a filled square covering all lane offsets
-        half_size = max(4, int(self.world_scale(LANE_OFFSET_M + 1.5)))
+        # Draw intersection as a filled square sized by stop_line_distance
         for inter in city.intersections.values():
+            half_size = max(4, int(self.world_scale(inter.stop_line_distance)))
             sx, sy = self.world_to_screen(inter.position, city)
             rect = pygame.Rect(sx - half_size, sy - half_size, half_size * 2, half_size * 2)
             pygame.draw.rect(self.screen, self.config.intersection_color, rect)
@@ -212,35 +272,43 @@ class Renderer:
             pygame.draw.circle(self.screen, color, pos, 3)
 
     def _draw_routes(self, city: City) -> None:
-        """Draw projected route for each vehicle as a semi-transparent line."""
-        self._route_surface.fill((0, 0, 0, 0))  # clear alpha surface
-        route_alpha = 50  # 0-255, low = more transparent
+        """Draw a straight line from each vehicle to its destination + X marker."""
+        self._route_surface.fill((0, 0, 0, 0))
+        line_alpha = 50
+        marker_alpha = 160
 
         for v in city.vehicles.values():
             route: Route | None = v.planned_route  # type: ignore[assignment]
-            if not route or route.is_finished:
+            if not route or not route.destination_street_id:
+                continue
+
+            dest_street = city.get_street(route.destination_street_id)
+            if not dest_street or dest_street.length <= 0:
                 continue
 
             color = VEHICLE_COLORS.get(v.vehicle_type, (200, 200, 200))
-            color_alpha = (color[0], color[1], color[2], route_alpha)
 
-            # Build polyline: current position → remaining intersections
-            points: list[tuple[int, int]] = []
-
-            # Start from vehicle's current screen position
+            # Vehicle screen position
             lateral = LANE_OFFSET_M
             offset_pos = self._offset_point(v.position, v.heading, lateral)
-            points.append(self.world_to_screen(offset_pos, city))
+            veh_screen = self.world_to_screen(offset_pos, city)
 
-            # Add each remaining intersection in the route
-            for idx in range(route.current_index, len(route.intersection_ids)):
-                iid = route.intersection_ids[idx]
-                inter = city.get_intersection(iid)
-                if inter:
-                    points.append(self.world_to_screen(inter.position, city))
+            # Destination screen position
+            dest_pos, _ = dest_street.point_at_distance(
+                route.destination_progress * dest_street.length
+            )
+            dest_screen = self.world_to_screen(dest_pos, city)
 
-            if len(points) >= 2:
-                pygame.draw.lines(self._route_surface, color_alpha, False, points, 2)
+            # Straight line from vehicle to destination
+            line_color = (color[0], color[1], color[2], line_alpha)
+            pygame.draw.line(self._route_surface, line_color, veh_screen, dest_screen, 1)
+
+            # X marker at destination
+            mx, my = dest_screen
+            m = 4
+            marker_color = (color[0], color[1], color[2], marker_alpha)
+            pygame.draw.line(self._route_surface, marker_color, (mx - m, my - m), (mx + m, my + m), 2)
+            pygame.draw.line(self._route_surface, marker_color, (mx - m, my + m), (mx + m, my - m), 2)
 
         self.screen.blit(self._route_surface, (0, 0))
 
@@ -289,9 +357,14 @@ class Renderer:
             (f"Spawned: {sim.total_spawned}", self.font, (140, 140, 160)),
             (f"Despawned: {sim.total_despawned}", self.font, (140, 140, 160)),
             ("", self.font, (160, 160, 180)),
-            (f"Tráfico: {cfg.traffic_level:.0%}", self.font, (180, 180, 200)),
+            (f"Tráfico: {cfg.traffic_level:.1f}", self.font, (180, 180, 200)),
             (f"Clima: {cfg.weather.value}", self.font, (180, 180, 200)),
             (f"Velocidad: {cfg.time_scale:.1f}x", self.font, (180, 180, 200)),
+            ("", self.font, (160, 160, 180)),
+            ("EFICIENCIA", self.font_big, (220, 220, 240)),
+            ("", self.font, (160, 160, 180)),
+            (f"Optimalidad: {sim.avg_optimality:.0%}", self.font, (180, 180, 200)),
+            (f"Viajes comp: {sim.completed_trips}", self.font, (140, 140, 160)),
             ("", self.font, (160, 160, 180)),
             ("CONTROLES", self.font_big, (220, 220, 240)),
             ("", self.font, (160, 160, 180)),

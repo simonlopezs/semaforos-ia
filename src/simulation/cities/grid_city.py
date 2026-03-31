@@ -268,4 +268,7 @@ def build_grid_city(
         )
         city.add_despawn_point(dp)
 
+    # Compute intersection square sizes from crossing street widths
+    city.compute_intersection_sizes()
+
     return city

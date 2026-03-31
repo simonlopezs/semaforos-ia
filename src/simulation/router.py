@@ -21,9 +21,18 @@ class Route:
 
     intersection_ids : ordered list of intersections from origin to destination.
     current_index    : pointer to the NEXT intersection the vehicle is heading toward.
+    destination_street_id : the street where the final destination point is.
+    destination_progress  : 0.0–1.0, exact point on the destination street.
+    on_final_street       : True when the vehicle has entered the destination street
+                            and is heading toward destination_progress.
     """
     intersection_ids: list[str] = field(default_factory=list)
     current_index: int = 0
+    destination_street_id: str | None = None
+    destination_progress: float = 0.5
+    on_final_street: bool = False
+    total_distance: float = 0.0      # meters, full route distance
+    optimal_time: float = 0.0        # seconds, assuming all green + speed limit
 
     @property
     def destination_id(self) -> str | None:
@@ -125,6 +134,47 @@ class Router:
 
         # current_index = 1 because index 0 is the origin (already there)
         return Route(intersection_ids=path, current_index=1)
+
+    def compute_route_metrics(self, route: Route) -> None:
+        """
+        Calculate total_distance and optimal_time for a route.
+        Optimal time assumes all green lights and driving at each street's speed limit.
+        """
+        total_dist = 0.0
+        total_time = 0.0
+
+        # Sum distance/time for each street segment in the route
+        for i in range(len(route.intersection_ids) - 1):
+            from_id = route.intersection_ids[i]
+            to_id = route.intersection_ids[i + 1]
+            street_id = self.street_between(from_id, to_id)
+            if street_id:
+                street = self.city.get_street(street_id)
+                if street:
+                    total_dist += street.length
+                    speed = street.effective_max_speed_ms
+                    if speed > 0:
+                        total_time += street.length / speed
+
+        # Add the final leg on the destination street
+        if route.destination_street_id:
+            dest_street = self.city.get_street(route.destination_street_id)
+            if dest_street:
+                # Distance from the entry intersection to the destination point
+                last_iid = route.intersection_ids[-1] if route.intersection_ids else None
+                if last_iid == dest_street.start_intersection_id:
+                    leg_dist = route.destination_progress * dest_street.length
+                elif last_iid == dest_street.end_intersection_id:
+                    leg_dist = (1.0 - route.destination_progress) * dest_street.length
+                else:
+                    leg_dist = route.destination_progress * dest_street.length
+                total_dist += leg_dist
+                speed = dest_street.effective_max_speed_ms
+                if speed > 0:
+                    total_time += leg_dist / speed
+
+        route.total_distance = total_dist
+        route.optimal_time = total_time
 
     def street_between(self, from_id: str, to_id: str) -> str | None:
         """Find the street connecting two adjacent intersections."""
