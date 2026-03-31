@@ -363,7 +363,23 @@ class Simulator:
             else:
                 v.street_progress -= progress_delta
 
-            # Clamp to avoid overshooting into negative or >1
+            # --- Hard clamp: front must not pass the stop line ---
+            if must_stop_for_light and street.length > 0:
+                if is_forward:
+                    stop_progress = 1.0 - self.config.stop_margin / street.length
+                    if v.street_progress > stop_progress:
+                        v.street_progress = stop_progress
+                        v.speed = 0.0
+                        v.acceleration = 0.0
+                        v.state = VehicleState.WAITING_LIGHT
+                else:
+                    stop_progress = self.config.stop_margin / street.length
+                    if v.street_progress < stop_progress:
+                        v.street_progress = stop_progress
+                        v.speed = 0.0
+                        v.acceleration = 0.0
+                        v.state = VehicleState.WAITING_LIGHT
+
             clamped_progress = max(0.0, min(1.0, v.street_progress))
             pos, heading = street.point_at_distance(clamped_progress * street.length)
             v.position = pos
