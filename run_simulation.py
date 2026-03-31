@@ -82,6 +82,8 @@ def main() -> None:
                         sim.config.time_scale = min(10.0, sim.config.time_scale + 0.5)
                     elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
                         sim.config.time_scale = max(0.0, sim.config.time_scale - 0.5)
+                    elif event.key == pygame.K_t:
+                        renderer.show_routes = not renderer.show_routes
 
             # --- Update ---
             if not paused:

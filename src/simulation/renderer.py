@@ -16,6 +16,7 @@ from src.simulation.config import SimulationConfig
 from src.simulation.enums import TrafficLightState, VehicleType
 from src.simulation.models.city import City
 from src.simulation.models.geometry import Point2D
+from src.simulation.router import Route
 
 if TYPE_CHECKING:
     from src.simulation.simulator import Simulator
@@ -58,6 +59,14 @@ class Renderer:
         self.hud_width = 200
         self.map_w = config.window_width - self.hud_width - self.map_margin * 2
         self.map_h = config.window_height - self.map_margin * 2
+
+        # Alpha surface for semi-transparent route lines
+        self._route_surface = pygame.Surface(
+            (config.window_width, config.window_height), pygame.SRCALPHA
+        )
+
+        # Toggle state
+        self.show_routes = False
 
         # Cache scale once we know the city
         self._scale: float = 1.0
@@ -141,6 +150,8 @@ class Renderer:
         self._draw_streets(city)
         self._draw_intersections(city)
         self._draw_traffic_lights(city)
+        if self.show_routes:
+            self._draw_routes(city)
         self._draw_vehicles(city)
         self._draw_hud(sim)
 
@@ -200,6 +211,39 @@ class Renderer:
             pos = self.world_to_screen(light_world, city)
             pygame.draw.circle(self.screen, color, pos, 3)
 
+    def _draw_routes(self, city: City) -> None:
+        """Draw projected route for each vehicle as a semi-transparent line."""
+        self._route_surface.fill((0, 0, 0, 0))  # clear alpha surface
+        route_alpha = 50  # 0-255, low = more transparent
+
+        for v in city.vehicles.values():
+            route: Route | None = v.planned_route  # type: ignore[assignment]
+            if not route or route.is_finished:
+                continue
+
+            color = VEHICLE_COLORS.get(v.vehicle_type, (200, 200, 200))
+            color_alpha = (color[0], color[1], color[2], route_alpha)
+
+            # Build polyline: current position → remaining intersections
+            points: list[tuple[int, int]] = []
+
+            # Start from vehicle's current screen position
+            lateral = LANE_OFFSET_M
+            offset_pos = self._offset_point(v.position, v.heading, lateral)
+            points.append(self.world_to_screen(offset_pos, city))
+
+            # Add each remaining intersection in the route
+            for idx in range(route.current_index, len(route.intersection_ids)):
+                iid = route.intersection_ids[idx]
+                inter = city.get_intersection(iid)
+                if inter:
+                    points.append(self.world_to_screen(inter.position, city))
+
+            if len(points) >= 2:
+                pygame.draw.lines(self._route_surface, color_alpha, False, points, 2)
+
+        self.screen.blit(self._route_surface, (0, 0))
+
     def _draw_vehicles(self, city: City) -> None:
         for v in city.vehicles.values():
             color = VEHICLE_COLORS.get(v.vehicle_type, (200, 200, 200))
@@ -253,6 +297,7 @@ class Renderer:
             ("", self.font, (160, 160, 180)),
             ("↑↓  Tráfico", self.font, (140, 140, 160)),
             ("+/- Velocidad", self.font, (140, 140, 160)),
+            ("T   Rutas " + ("ON" if self.show_routes else "OFF"), self.font, (140, 140, 160)),
             ("P   Pausa", self.font, (140, 140, 160)),
             ("R   Reset", self.font, (140, 140, 160)),
             ("ESC Salir", self.font, (140, 140, 160)),
