@@ -34,7 +34,7 @@ class SimulationConfig:
     default_acceleration: float = 2.5    # m/s²  comfortable accel
     default_deceleration: float = 3.5    # m/s²  comfortable braking
     stop_margin: float = 5.0             # meters before intersection stop line
-    min_following_gap: float = 3.0       # meters bumper-to-bumper minimum
+    min_following_gap: float = 1.0       # meters bumper-to-bumper minimum
 
     # --- Rendering ---
     window_width: int = 1100

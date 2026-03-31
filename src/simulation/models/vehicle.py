@@ -138,10 +138,10 @@ class Vehicle:
     current_lane_index: int = 0
     # Progress along the current street's polyline [0.0 – 1.0]
     street_progress: float = 0.0
-    # Ordered list of intersection IDs forming the planned route
-    route: list[str] = field(default_factory=list)
-    # Index into `route` pointing to the next target intersection
-    route_index: int = 0
+    # Planned route (set by Router — typed as Any to avoid circular import)
+    planned_route: object | None = None
+    # Destination despawn point ID
+    destination_id: str | None = None
 
     # Simulation bookkeeping
     distance_traveled: float = 0.0   # meters since spawn
